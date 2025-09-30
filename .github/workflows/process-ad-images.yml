@@ -1,0 +1,82 @@
+name: Process ad images
+
+on:
+  push:
+    branches: [ main ]          # ← change to your default branch if it's not 'main'
+    paths:
+      - 'uploads/*.zip'         # ← runs only when a .zip is added to uploads/
+
+permissions:
+  contents: write               # ← allow committing back to the repo
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Ensure unzip is available
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Make folders
+        run: |
+          mkdir -p public/ads/current
+          mkdir -p public/ads/archive
+          mkdir -p work
+
+      - name: Extract and transform images
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          timestamp=$(date +'%Y%m%d_%H%M%S')
+
+          for z in uploads/*.zip; do
+            echo "Processing $z"
+            rm -rf work/* || true
+            unzip -j "$z" -d work >/dev/null
+
+            # Rename *_BASE_1..4.(jpg/jpeg) -> page1..4.jpg
+            for i in 1 2 3 4; do
+              found="false"
+              for ext in jpg JPG jpeg JPEG; do
+                files=(work/*_BASE_${i}.${ext})
+                if [ ${#files[@]} -gt 0 ]; then
+                  mv -f "${files[0]}" "work/page${i}.jpg"
+                  found="true"
+                  break
+                fi
+              done
+              if [ "$found" != "true" ]; then
+                echo "::error::Missing *_BASE_${i}.jpg in $z"
+                exit 1
+              fi
+            done
+
+            # Archive current pages if they exist
+            if ls public/ads/current/page*.jpg >/dev/null 2>&1; then
+              mkdir -p "public/ads/archive/${timestamp}"
+              mv public/ads/current/page*.jpg "public/ads/archive/${timestamp}/" || true
+            fi
+
+            # Move new images into current
+            mv -f work/page*.jpg public/ads/current/
+
+            # Delete the uploaded zip from the repo
+            git rm -f "$z"
+          done
+
+      - name: Commit and push changes
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Processed weekly ad images"
+            git push
+          fi
