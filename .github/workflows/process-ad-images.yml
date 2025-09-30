@@ -2,9 +2,13 @@ name: Process Weekly Ad Images
 
 on:
   push:
+    branches: [ main ]            # make sure this matches your default branch
     paths:
       - 'uploads/**/*.zip'
   workflow_dispatch:
+
+permissions:
+  contents: write                 # <-- REQUIRED so the job can commit/push
 
 jobs:
   process-images:
@@ -12,84 +16,95 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}   # default; explicit for clarity
+
+      - name: Ensure unzip is available
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
 
       - name: Find latest zip file
         id: find-zip
+        shell: bash
         run: |
-          ZIP_FILE=$(find uploads -name "*.zip" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2)
+          set -euo pipefail
+          ZIP_FILE=$(find uploads -name "*.zip" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2 || true)
+          if [ -z "${ZIP_FILE:-}" ]; then
+            echo "No zip found in uploads/. Exiting."
+            exit 0
+          fi
           echo "zip_file=$ZIP_FILE" >> $GITHUB_OUTPUT
           echo "Found zip file: $ZIP_FILE"
 
-          # Extract date from filename (format: YYYYMMDD_*.zip)
           FILENAME=$(basename "$ZIP_FILE")
-          AD_DATE=$(echo "$FILENAME" | grep -oE '^[0-9]{8}')
-
+          AD_DATE=$(echo "$FILENAME" | grep -oE '^[0-9]{8}' || true)
           if [ -z "$AD_DATE" ]; then
-            echo "ERROR: Could not extract date from filename: $FILENAME"
-            echo "Expected format: YYYYMMDD_*.zip (e.g., 20251009_weekly_ad.zip)"
+            echo "::error::Could not extract date from filename: $FILENAME"
+            echo "Expected: YYYYMMDD_*.zip (e.g., 20251009_weekly_ad.zip)"
             exit 1
           fi
 
-          # Convert YYYYMMDD to YYYY-MM-DD for folder name
           FOLDER_DATE="${AD_DATE:0:4}-${AD_DATE:4:2}-${AD_DATE:6:2}"
           echo "ad_date=$FOLDER_DATE" >> $GITHUB_OUTPUT
           echo "Extracted ad date: $FOLDER_DATE (from $FILENAME)"
 
       - name: Extract and rename images
+        if: steps.find-zip.outputs.zip_file != ''
+        shell: bash
         run: |
+          set -euo pipefail
           ZIP_FILE="${{ steps.find-zip.outputs.zip_file }}"
           AD_DATE="${{ steps.find-zip.outputs.ad_date }}"
 
-          # Create temp directory
           mkdir -p temp_extract
+          unzip -j "$ZIP_FILE" -d temp_extract
 
-          # Extract zip file
-          unzip "$ZIP_FILE" -d temp_extract
-
-          # Create dated folder for this ad
           AD_FOLDER="public/ads/$AD_DATE"
           mkdir -p "$AD_FOLDER"
 
-          # Find and rename BASE images to dated folder
-          find temp_extract -type f -name "*BASE_1.jpg" -exec cp {} "$AD_FOLDER/page1.jpg" \;
-          find temp_extract -type f -name "*BASE_2.jpg" -exec cp {} "$AD_FOLDER/page2.jpg" \;
-          find temp_extract -type f -name "*BASE_3.jpg" -exec cp {} "$AD_FOLDER/page3.jpg" \;
-          find temp_extract -type f -name "*BASE_4.jpg" -exec cp {} "$AD_FOLDER/page4.jpg" \;
+          # copy BASE_1..4 (jpg/jpeg, any case) to page1..4.jpg
+          found_any=false
+          for i in 1 2 3 4; do
+            # find first matching file for index i
+            FILE=$(find temp_extract -maxdepth 1 -type f \
+              \( -iname "*BASE_${i}.jpg" -o -iname "*BASE_${i}.jpeg" \) \
+              | head -n 1 || true)
+            if [ -z "${FILE:-}" ]; then
+              echo "::error::Missing *_BASE_${i}.jpg in $ZIP_FILE"
+              exit 1
+            fi
+            cp -f "$FILE" "$AD_FOLDER/page${i}.jpg"
+            found_any=true
+          done
 
-          # Also handle uppercase .JPG extension
-          find temp_extract -type f -name "*BASE_1.JPG" -exec cp {} "$AD_FOLDER/page1.jpg" \;
-          find temp_extract -type f -name "*BASE_2.JPG" -exec cp {} "$AD_FOLDER/page2.jpg" \;
-          find temp_extract -type f -name "*BASE_3.JPG" -exec cp {} "$AD_FOLDER/page3.jpg" \;
-          find temp_extract -type f -name "*BASE_4.JPG" -exec cp {} "$AD_FOLDER/page4.jpg" \;
+          # Update 'current' to point at this week (optional mirror)
+          mkdir -p public/ads/current
+          cp -f "$AD_FOLDER/page"*.jpg public/ads/current/
 
-          # Clean up
+          # Remove the uploaded zip from the repo (stage deletion)
+          git rm -f "$ZIP_FILE"
+
+          # Clean temp
           rm -rf temp_extract
-          rm "$ZIP_FILE"
 
-          # Verify images were created
-          echo "✓ Created ad folder: $AD_FOLDER"
-          echo "Images in $AD_FOLDER:"
-          ls -lh "$AD_FOLDER/"
-
-          echo ""
-          echo "All available ad weeks:"
-          ls -la public/ads/ | grep "^d" | grep -E "[0-9]{4}-[0-9]{2}-[0-9]{2}"
+          echo "✓ Created/updated: $AD_FOLDER"
+          ls -lh "$AD_FOLDER" || true
 
       - name: Commit and push changes
+        if: steps.find-zip.outputs.zip_file != ''
+        shell: bash
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-
-          git add public/ads/
-          git add uploads/
-
-          # Check if there are changes to commit
-          if git diff --staged --quiet; then
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
             echo "No changes to commit"
-          else
-            git commit -m "🔄 Update weekly ad images [automated]"
-            git push
+            exit 0
           fi
+          git commit -m "🔄 Update weekly ad images for ${{ steps.find-zip.outputs.ad_date }} [automated]"
+          # push back to the same branch that triggered the workflow
+          git push origin HEAD:${{ github.ref_name }}
