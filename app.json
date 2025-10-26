@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Union Market Rewards",
+    "slug": "union-market-rewards",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "android": {},
+    "ios": {
+      "supportsTablet": false
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "entryPoint": "./node_modules/expo-router/entry",
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
